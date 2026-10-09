@@ -1,0 +1,39 @@
+export const DEFAULT_POLICY={semester:'2026/2027 · Semester 1',institution:'AcademyTrack Sample Campus',registrationDeadline:'2026-12-31',reportDays:7,passMark:40,minCredits:18,requireProject:true,requireAttachment:true,weights:{cat:20,assignment:10,exam:70},scale:[{min:80,letter:'A',points:4},{min:75,letter:'B+',points:3.5},{min:65,letter:'B',points:3},{min:60,letter:'C+',points:2.5},{min:50,letter:'C',points:2},{min:40,letter:'D',points:1},{min:0,letter:'F',points:0}]};
+export function migrate(db){
+  db.exec(`CREATE TABLE IF NOT EXISTS migrations(version INTEGER PRIMARY KEY);
+  CREATE TABLE IF NOT EXISTS programmes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,body TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS student_programmes(student_id INTEGER PRIMARY KEY REFERENCES users(id),programme_id INTEGER NOT NULL REFERENCES programmes(id));
+  CREATE TABLE IF NOT EXISTS competencies(student_id INTEGER REFERENCES users(id),course_id INTEGER REFERENCES courses(id),semester TEXT NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('competent','not_yet_competent','not_assessed')),note TEXT NOT NULL,PRIMARY KEY(student_id,course_id,semester));
+  CREATE TABLE IF NOT EXISTS staff_roles(user_id INTEGER PRIMARY KEY REFERENCES users(id), role TEXT NOT NULL CHECK(role IN ('department','finance')));
+  CREATE TABLE IF NOT EXISTS policies(semester TEXT PRIMARY KEY, body TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS curriculum(course_id INTEGER REFERENCES courses(id),semester TEXT NOT NULL,required INTEGER NOT NULL DEFAULT 1,prerequisite_id INTEGER REFERENCES courses(id),programme_id INTEGER NOT NULL DEFAULT 1 REFERENCES programmes(id),PRIMARY KEY(course_id,programme_id));
+  CREATE TABLE IF NOT EXISTS registrations(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES users(id),course_id INTEGER NOT NULL REFERENCES courses(id),semester TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),note TEXT NOT NULL DEFAULT '',UNIQUE(student_id,course_id,semester));
+  CREATE TABLE IF NOT EXISTS report_flow(report_id INTEGER PRIMARY KEY REFERENCES reports(id),stage TEXT NOT NULL DEFAULT 'submitted',assignee_id INTEGER REFERENCES users(id),due_at TEXT NOT NULL,escalated INTEGER NOT NULL DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,record_id INTEGER NOT NULL,actor_id INTEGER NOT NULL REFERENCES users(id),message TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+  CREATE TABLE IF NOT EXISTS evidence(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,record_id INTEGER NOT NULL,owner_id INTEGER NOT NULL REFERENCES users(id),name TEXT NOT NULL,mime TEXT NOT NULL,bytes BLOB NOT NULL,created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+  CREATE TABLE IF NOT EXISTS assessments(student_id INTEGER REFERENCES users(id),course_id INTEGER REFERENCES courses(id),semester TEXT NOT NULL,component TEXT NOT NULL CHECK(component IN ('cat','assignment','exam')),status TEXT NOT NULL CHECK(status IN ('not_submitted','awaiting_marking','not_uploaded','confirmed')),score REAL,PRIMARY KEY(student_id,course_id,semester,component));
+  CREATE TABLE IF NOT EXISTS clearances(student_id INTEGER PRIMARY KEY REFERENCES users(id),project INTEGER NOT NULL DEFAULT 0,attachment INTEGER NOT NULL DEFAULT 0,department INTEGER NOT NULL DEFAULT 0,note TEXT NOT NULL DEFAULT '');
+  CREATE TABLE IF NOT EXISTS payment_queries(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES users(id),reference TEXT NOT NULL UNIQUE,amount INTEGER NOT NULL,paid_on TEXT NOT NULL,remarks TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified','rejected')),response TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+  CREATE TABLE IF NOT EXISTS exam_requests(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES users(id),course_id INTEGER NOT NULL REFERENCES courses(id),semester TEXT NOT NULL,type TEXT NOT NULL CHECK(type IN ('special','supplementary')),reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','completed')),note TEXT NOT NULL DEFAULT '',scheduled_at TEXT,venue TEXT NOT NULL DEFAULT '',fee INTEGER NOT NULL DEFAULT 0,result REAL,created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+  CREATE TABLE IF NOT EXISTS notices(id INTEGER PRIMARY KEY,author_id INTEGER NOT NULL REFERENCES users(id),course_id INTEGER REFERENCES courses(id),title TEXT NOT NULL,body TEXT NOT NULL,due_at TEXT,created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+  CREATE TABLE IF NOT EXISTS representatives(student_id INTEGER REFERENCES users(id),course_id INTEGER REFERENCES courses(id),PRIMARY KEY(student_id,course_id));
+  CREATE TABLE IF NOT EXISTS funding(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES users(id),provider TEXT NOT NULL,deadline TEXT NOT NULL,status TEXT NOT NULL,reference TEXT NOT NULL DEFAULT '',documents TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+  CREATE TABLE IF NOT EXISTS drafts(user_id INTEGER PRIMARY KEY REFERENCES users(id),body TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,actor_id INTEGER NOT NULL REFERENCES users(id),action TEXT NOT NULL,detail TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));`);
+  if(!db.prepare('PRAGMA table_info(exam_requests)').all().some(c=>c.name==='outcome'))db.exec('ALTER TABLE exam_requests ADD COLUMN outcome TEXT');
+  if(!db.prepare('SELECT 1 FROM migrations WHERE version=2').get()){
+    db.exec('BEGIN');try{
+      db.prepare('INSERT OR IGNORE INTO programmes VALUES(1,?,?)').run('General programme (sample)',JSON.stringify({institutionType:'university',calendar:'semester',resultMode:'gpa'}));
+      db.prepare('INSERT OR IGNORE INTO policies VALUES(?,?)').run(DEFAULT_POLICY.semester,JSON.stringify(DEFAULT_POLICY));
+      db.prepare('INSERT OR IGNORE INTO settings VALUES(?,?)').run('semester',DEFAULT_POLICY.semester);
+      db.prepare("INSERT OR IGNORE INTO registrations(student_id,course_id,semester,status) SELECT student_id,course_id,?,'approved' FROM enrollments").run(DEFAULT_POLICY.semester);
+      db.prepare('INSERT OR IGNORE INTO curriculum(course_id,semester) SELECT id,? FROM courses').run(DEFAULT_POLICY.semester);
+      db.exec("INSERT OR IGNORE INTO report_flow SELECT r.id,CASE WHEN r.status='resolved' THEN 'resolved' ELSE 'submitted' END,c.lecturer_id,strftime('%Y-%m-%dT%H:%M:%fZ',r.created_at,'+7 days'),0 FROM reports r JOIN courses c ON c.id=r.course_id;");
+      db.exec('INSERT INTO migrations VALUES(2); COMMIT');
+    }catch(e){db.exec('ROLLBACK');throw e;}
+  }
+}
+export function programmeId(db,student){return db.prepare('SELECT programme_id FROM student_programmes WHERE student_id=?').get(student)?.programme_id||1;}
+export function policy(db,semester,student){const term=semester||db.prepare("SELECT value FROM settings WHERE key='semester'").get().value;const row=db.prepare('SELECT body FROM policies WHERE semester=?').get(term);const base=row?JSON.parse(row.body):{...DEFAULT_POLICY,semester:term};const programme=student?db.prepare('SELECT * FROM programmes WHERE id=?').get(programmeId(db,student)):null;return {...base,...(programme?JSON.parse(programme.body):{}),semester:term,programme:programme?.name||null};}
+export function policyGrade(db,value,semester,student){if(value==null)return {letter:'—',points:null};const band=policy(db,semester,student).scale.find(s=>value>=s.min);return {letter:band.letter,points:band.points};}
